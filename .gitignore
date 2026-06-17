@@ -11,3 +11,4 @@ __pycache__/
 
 # 3. Bỏ qua tất cả các file và thư mục con bên trong thư mục assets
 /assets/*
+/venv
