@@ -1,0 +1,13 @@
+*.tar.gz
+/rvc_eval_project/raw_data/LibriTTS
+__pycache__/
+
+# 1. Bỏ qua tất cả các file và thư mục con bên trong thư mục logs
+/logs/*
+
+# 2. Nhưng không bỏ qua thư mục mute
+!/logs/mute/
+
+
+# 3. Bỏ qua tất cả các file và thư mục con bên trong thư mục assets
+/assets/*
