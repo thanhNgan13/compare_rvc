@@ -4,9 +4,11 @@ Compatibility patches that must run before `import fairseq`.
 1. PyTorch 2.6+ defaults torch.load(..., weights_only=True).
    Fairseq HuBERT checkpoints unpickle custom classes; they need weights_only=False.
 
-2. Python 3.12 raises ValueError for @dataclass instances used as mutable field defaults.
-   fairseq 0.12.2 FairseqConfig has e.g. `common: CommonConfig = CommonConfig()`.
-   We rewrite configs.py on disk replacing those with field(default_factory=...).
+2. Python 3.12 raises ValueError for @dataclass instances used as mutable field
+   defaults (e.g. `common: CommonConfig = CommonConfig()`).
+   fairseq 0.12.2 AND its dependency hydra both use this pattern extensively.
+   Patching individual source files is fragile — instead we patch
+   dataclasses._get_field itself so every affected package is fixed at once.
 """
 from __future__ import annotations
 
@@ -15,50 +17,38 @@ import inspect
 _applied = False
 
 
-def _patch_fairseq_dataclass_configs() -> None:
-    import importlib.util
-    import re
-    from pathlib import Path
+def _patch_py312_mutable_dataclass_defaults() -> None:
+    """Patch Python 3.12 dataclasses to accept @dataclass instances as defaults.
 
-    # Find fairseq's install location without importing it
-    spec = importlib.util.find_spec("fairseq")
-    if spec is None or spec.origin is None:
+    Converts  `foo: Cls = Cls()`  to  `foo: Cls = field(default_factory=Cls)`
+    transparently at class-creation time, before Python's strict check runs.
+    Covers fairseq, hydra, omegaconf, and any other package with the same pattern.
+    """
+    import dataclasses
+    import sys
+    import types
+
+    if sys.version_info < (3, 12):
         return
-    configs = Path(spec.origin).parent / "dataclass" / "configs.py"
-    if not configs.exists():
+    if getattr(dataclasses, "_py312_compat_patched", False):
         return
 
-    text = configs.read_text("utf-8")
+    _orig = dataclasses._get_field
 
-    # Check if there are any mutable dataclass defaults still present
-    # Pattern:  fieldname: ClassName = ClassName()  (type annotation == default class)
-    pattern = re.compile(r"(\w+): (\w+) = \2\(\)")
-    if not pattern.search(text):
-        return  # already patched or nothing to do
+    def _lenient_get_field(cls, a_name, a_type, default_kw_only):
+        raw = getattr(cls, a_name, dataclasses.MISSING)
+        if (
+            raw is not dataclasses.MISSING
+            and not isinstance(raw, (dataclasses.Field, types.MemberDescriptorType))
+            and hasattr(raw, "__dataclass_fields__")
+        ):
+            # Mutable @dataclass default → convert to default_factory
+            setattr(cls, a_name, dataclasses.field(default_factory=type(raw)))
+        return _orig(cls, a_name, a_type, default_kw_only)
 
-    # Ensure 'field' is in the dataclasses import line
-    if re.search(r"from dataclasses import[^\n]*\bfield\b", text) is None:
-        text = re.sub(
-            r"(from dataclasses import )(\w)",
-            r"\1field, \2",
-            text,
-            count=1,
-        )
-
-    # Replace:  foo: SomeClass = SomeClass()
-    # With:     foo: SomeClass = field(default_factory=SomeClass)
-    patched = pattern.sub(r"\1: \2 = field(default_factory=\2)", text)
-
-    configs.write_text(patched, "utf-8")
-
-    # Invalidate cached .pyc so Python recompiles from the patched source
-    for pyc in configs.parent.glob("__pycache__/configs*.pyc"):
-        try:
-            pyc.unlink()
-        except OSError:
-            pass
-
-    print("[fairseq_compat] patched fairseq/dataclass/configs.py for Python 3.12")
+    dataclasses._get_field = _lenient_get_field
+    dataclasses._py312_compat_patched = True
+    print("[fairseq_compat] patched dataclasses._get_field for Python 3.12")
 
 
 def apply_fairseq_torch_load_compat() -> None:
@@ -66,7 +56,7 @@ def apply_fairseq_torch_load_compat() -> None:
     if _applied:
         return
 
-    _patch_fairseq_dataclass_configs()
+    _patch_py312_mutable_dataclass_defaults()
 
     import torch
 
