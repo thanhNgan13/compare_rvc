@@ -16,46 +16,49 @@ _applied = False
 
 
 def _patch_fairseq_dataclass_configs() -> None:
+    import importlib.util
     import re
-    import sys
     from pathlib import Path
 
-    for base in sys.path:
-        configs = Path(base) / "fairseq" / "dataclass" / "configs.py"
-        if not configs.exists():
-            continue
+    # Find fairseq's install location without importing it
+    spec = importlib.util.find_spec("fairseq")
+    if spec is None or spec.origin is None:
+        return
+    configs = Path(spec.origin).parent / "dataclass" / "configs.py"
+    if not configs.exists():
+        return
 
-        text = configs.read_text("utf-8")
-        if "default_factory" in text:
-            return  # already patched
+    text = configs.read_text("utf-8")
 
-        # Ensure 'field' is in the dataclasses import line
-        if re.search(r"from dataclasses import[^\n]*\bfield\b", text) is None:
-            text = re.sub(
-                r"(from dataclasses import )(\w)",
-                r"\1field, \2",
-                text,
-                count=1,
-            )
+    # Check if there are any mutable dataclass defaults still present
+    # Pattern:  fieldname: ClassName = ClassName()  (type annotation == default class)
+    pattern = re.compile(r"(\w+): (\w+) = \2\(\)")
+    if not pattern.search(text):
+        return  # already patched or nothing to do
 
-        # Replace:  foo: SomeClass = SomeClass()
-        # With:     foo: SomeClass = field(default_factory=SomeClass)
-        patched = re.sub(
-            r"(\w+): (\w+) = \2\(\)",
-            r"\1: \2 = field(default_factory=\2)",
+    # Ensure 'field' is in the dataclasses import line
+    if re.search(r"from dataclasses import[^\n]*\bfield\b", text) is None:
+        text = re.sub(
+            r"(from dataclasses import )(\w)",
+            r"\1field, \2",
             text,
+            count=1,
         )
 
-        if patched != text:
-            configs.write_text(patched, "utf-8")
-            # Invalidate cached .pyc so Python recompiles from the patched source
-            for pyc in configs.parent.glob("__pycache__/configs*.pyc"):
-                try:
-                    pyc.unlink()
-                except OSError:
-                    pass
-            print("[fairseq_compat] patched fairseq/dataclass/configs.py for Python 3.12")
-        return
+    # Replace:  foo: SomeClass = SomeClass()
+    # With:     foo: SomeClass = field(default_factory=SomeClass)
+    patched = pattern.sub(r"\1: \2 = field(default_factory=\2)", text)
+
+    configs.write_text(patched, "utf-8")
+
+    # Invalidate cached .pyc so Python recompiles from the patched source
+    for pyc in configs.parent.glob("__pycache__/configs*.pyc"):
+        try:
+            pyc.unlink()
+        except OSError:
+            pass
+
+    print("[fairseq_compat] patched fairseq/dataclass/configs.py for Python 3.12")
 
 
 def apply_fairseq_torch_load_compat() -> None:
