@@ -22,10 +22,13 @@ logger = logging.getLogger(__name__)
 
 def _run(cmd: str, cwd: Path, on_line: Optional[Callable[[str], None]] = None) -> int:
     logger.info("Execute: %s", cmd)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(cwd) + os.pathsep + env.get("PYTHONPATH", "")
     p = subprocess.Popen(
         cmd,
         shell=True,
         cwd=str(cwd),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
