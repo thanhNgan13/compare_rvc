@@ -5,24 +5,29 @@ Compatibility patches that must run before `import fairseq`.
    Fairseq HuBERT checkpoints unpickle custom classes; they need weights_only=False.
 
 2. Python 3.12 raises ValueError for @dataclass instances used as mutable field
-   defaults (e.g. `common: CommonConfig = CommonConfig()`).
-   fairseq 0.12.2 AND its dependency hydra both use this pattern extensively.
-   Patching individual source files is fragile — instead we patch
-   dataclasses._get_field itself so every affected package is fixed at once.
+   defaults. fairseq 0.12.2, hydra, and omegaconf all use this pattern.
+   We patch dataclasses._get_field to silently allow it.
+
+3. After fix #2, hydra_init() in fairseq/__init__.py still fails because
+   omegaconf cannot handle default_factory fields in structured configs.
+   hydra_init() is only needed for the Hydra CLI (fairseq-train etc.) —
+   not for checkpoint loading. We patch fairseq/__init__.py to skip it on error.
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 
 _applied = False
 
 
 def _patch_py312_mutable_dataclass_defaults() -> None:
-    """Patch Python 3.12 dataclasses to accept @dataclass instances as defaults.
+    """Patch dataclasses._get_field to accept @dataclass instances as defaults.
 
-    Converts  `foo: Cls = Cls()`  to  `foo: Cls = field(default_factory=Cls)`
-    transparently at class-creation time, before Python's strict check runs.
-    Covers fairseq, hydra, omegaconf, and any other package with the same pattern.
+    Python 3.12 raises ValueError when a field's default is itself a @dataclass
+    instance. fairseq/hydra/omegaconf use this extensively. We intercept
+    _get_field and convert such defaults to field(default_factory=...) so
+    the @dataclass decorator can finish processing without error.
     """
     import dataclasses
     import sys
@@ -42,7 +47,6 @@ def _patch_py312_mutable_dataclass_defaults() -> None:
             and not isinstance(raw, (dataclasses.Field, types.MemberDescriptorType))
             and hasattr(raw, "__dataclass_fields__")
         ):
-            # Mutable @dataclass default → convert to default_factory
             setattr(cls, a_name, dataclasses.field(default_factory=type(raw)))
         return _orig(cls, a_name, a_type, default_kw_only)
 
@@ -51,12 +55,55 @@ def _patch_py312_mutable_dataclass_defaults() -> None:
     print("[fairseq_compat] patched dataclasses._get_field for Python 3.12")
 
 
+def _patch_fairseq_hydra_init() -> None:
+    """Wrap hydra_init() in fairseq/__init__.py with try-except.
+
+    After the _get_field patch converts mutable defaults to default_factory,
+    omegaconf sees MISSING instead of actual default instances and raises
+    ValidationError inside hydra_init(). hydra_init() is only needed for
+    the Hydra CLI interface — not for checkpoint loading / HuBERT inference.
+    Skipping it on error allows `import fairseq` to complete normally.
+    """
+    spec = importlib.util.find_spec("fairseq")
+    if spec is None or spec.origin is None:
+        return
+
+    from pathlib import Path
+
+    fairseq_init = Path(spec.origin)
+    text = fairseq_init.read_text("utf-8")
+
+    if "hydra_init()" not in text:
+        return  # already removed or different version
+
+    # Check if already patched (our sentinel comment is present)
+    if "# compat: skip on py312" in text:
+        return
+
+    patched = text.replace(
+        "hydra_init()",
+        "try:\n    hydra_init()\nexcept Exception:\n    pass  # compat: skip on py312",
+    )
+
+    if patched == text:
+        return
+
+    fairseq_init.write_text(patched, "utf-8")
+    for pyc in fairseq_init.parent.glob("__pycache__/__init__*.pyc"):
+        try:
+            pyc.unlink()
+        except OSError:
+            pass
+    print("[fairseq_compat] patched fairseq/__init__.py: hydra_init() wrapped in try-except")
+
+
 def apply_fairseq_torch_load_compat() -> None:
     global _applied
     if _applied:
         return
 
     _patch_py312_mutable_dataclass_defaults()
+    _patch_fairseq_hydra_init()
 
     import torch
 
