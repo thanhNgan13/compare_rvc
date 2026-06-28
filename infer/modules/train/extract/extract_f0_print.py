@@ -83,14 +83,11 @@ class FeatureInput(object):
             f0 = pyworld.stonemask(x.astype(np.double), f0, t, self.fs)
         elif f0_method == "rmvpe":
             if hasattr(self, "model_rmvpe") == False:
-                import torch
                 from infer.lib.rmvpe import RMVPE
 
-                _device = "cuda" if torch.cuda.is_available() else "cpu"
-                _is_half = _device == "cuda"
-                print(f"Loading rmvpe model on {_device}")
+                print("Loading rmvpe model")
                 self.model_rmvpe = RMVPE(
-                    "assets/rmvpe/rmvpe.pt", is_half=_is_half, device=_device
+                    "assets/rmvpe/rmvpe.pt", is_half=False,
                 )
             f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
         return f0
